@@ -1065,7 +1065,187 @@ void ObstacleUpdater::PublishMessage(const std::string& channel_name) {
 }
 ```
 
+我来帮你分析后端代码中 `ObstacleUpdater::PublishMessage()` 的实现，并解释为什么 `StreamData` 和 `PerceptionObstacles` 的序列化方式不同。
+
+
+[3 tools called]
+
+根据我对代码的分析，我可以回答你的问题：
+
+## 后端实现分析
+
+**是的，后端确实是按照你描述的方式实现的**。让我详细解释一下：
+
+### 1. 实际的 `PublishMessage()` 实现
+
+```cpp
+void ObstacleUpdater::PublishMessage(const std::string& channel_name) {
+  std::string to_send = "";
+  GetObjects(&to_send, channel_name);           // 1. 获取障碍物数据
+  
+  StreamData stream_data;                       // 2. 创建 StreamData 消息
+  stream_data.set_action("stream");
+  stream_data.set_data_name("obstacle");
+  stream_data.set_channel_name(channel_name);
+  
+  std::vector<uint8_t> byte_data(to_send.begin(), to_send.end());  // 3. 转换为二进制
+  stream_data.set_data(&(byte_data[0]), byte_data.size());
+  stream_data.set_type("obstacle");
+  
+  std::string stream_data_string;              // 4. 序列化并广播
+  stream_data.SerializeToString(&stream_data_string);
+  websocket_->BroadcastBinaryData(stream_data_string);
+}
+```
+
+### 2. 为什么序列化方式不同？
+
+这里涉及到**两层序列化**的概念：
+
+#### 第一层：`PerceptionObstacles` → `Obstacles` → 字符串
+```cpp
+// 在 GetObjects() 方法中
+channel_updater->obstacle_objects_.SerializeToString(to_send);
+```
+- `PerceptionObstacles` 被转换为 Dreamview 专用的 `Obstacles` 格式
+- `Obstacles` 被序列化为字符串格式
+
+#### 第二层：字符串 → 二进制 → `StreamData`
+```cpp
+std::vector<uint8_t> byte_data(to_send.begin(), to_send.end());
+stream_data.set_data(&(byte_data[0]), byte_data.size());
+stream_data.SerializeToString(&stream_data_string);
+```
+- 字符串被转换为二进制数据
+- 二进制数据被包装在 `StreamData` 中
+- `StreamData` 再次被序列化为最终的传输格式
+
+### 3. 数据转换流程
+
+```
+PerceptionObstacles (原始感知数据)
+    ↓ GetObjects()
+Obstacles (Dreamview格式)
+    ↓ SerializeToString()
+std::string (序列化字符串)
+    ↓ std::vector<uint8_t>
+Binary Data (二进制数据)
+    ↓ set_data()
+StreamData (传输包装)
+    ↓ SerializeToString()
+Final Binary (最终传输数据)
+```
+
+### 4. 为什么需要两层序列化？
+
+1. **数据格式转换**：`PerceptionObstacles` 是感知模块的原始格式，需要转换为前端友好的 `Obstacles` 格式
+
+2. **传输协议**：`StreamData` 是 WebSocket 传输的统一协议，包含：
+   - `action`: "stream" (操作类型)
+   - `data_name`: "obstacle" (数据类型)
+   - `channel_name`: 频道名称
+   - `data`: 实际的二进制数据
+
+3. **前端解包**：前端收到数据后，先解包 `StreamData`，再根据 `data_name` 决定如何进一步处理二进制数据
+
+这种设计实现了**数据格式转换**和**传输协议分离**，使得系统更加模块化和可扩展。
+
+是的，`data` 字段中的实际二进制数据确实是**前端友好格式的二进制化**。让我详细解释这个数据流程：
+
+
+[3 tools called]
+
+根据代码分析，我可以明确回答你的问题：
+
+## 是的，`data` 字段中的二进制数据确实是前端友好格式的二进制化
+
+让我详细解释整个数据转换流程：
+
+### 1. 完整的数据转换链路
+
+```cpp
+// 第1步：感知模块原始数据
+PerceptionObstacles (原始感知格式)
+    ↓ OnObstacles() 接收
+std::vector<PerceptionObstacle> obstacles_ (存储在内存中)
+
+// 第2步：转换为前端友好格式
+GetObjects() 方法中：
+    ↓ 遍历 obstacles_
+for (const auto& obstacle : channel_updater->obstacles_) {
+    Object& obj = channel_updater->obj_map_[id];  // 创建前端友好的Object
+    SetObstacleInfo(obstacle, &obj);              // 转换基本信息
+    SetObstaclePolygon(obstacle, &obj);           // 转换多边形
+    SetObstacleType(obstacle.type(), &obj);       // 转换类型
+    // ... 其他转换
+}
+
+// 第3步：组装为Obstacles消息
+Obstacles obstacle_objects_;  // 前端友好的格式
+for (const auto& kv : channel_updater->obj_map_) {
+    *channel_updater->obstacle_objects_.add_obstacle() = kv.second;
+}
+channel_updater->obstacle_objects_.mutable_auto_driving_car()->CopyFrom(auto_driving_car);
+
+// 第4步：序列化为二进制
+std::string to_send = "";
+channel_updater->obstacle_objects_.SerializeToString(to_send);  // Obstacles → 二进制字符串
+
+// 第5步：包装为StreamData
+std::vector<uint8_t> byte_data(to_send.begin(), to_send.end());
+stream_data.set_data(&(byte_data[0]), byte_data.size());  // 二进制字符串 → 二进制数据
+```
+
+### 2. 关键证据
+
+从代码第199行可以看到：
+```cpp
+channel_updater->obstacle_objects_.SerializeToString(to_send);
+```
+
+这里的 `obstacle_objects_` 是 `Obstacles` 类型（前端友好格式），而不是 `PerceptionObstacles`（原始格式）。
+
+### 3. 数据格式对比
+
+| 阶段       | 数据格式              | 说明                    |
+| ---------- | --------------------- | ----------------------- |
+| **输入**   | `PerceptionObstacles` | 感知模块原始格式        |
+| **转换**   | `Object` (多个)       | 前端友好的单个对象格式  |
+| **组装**   | `Obstacles`           | 前端友好的集合格式      |
+| **序列化** | `std::string`         | Obstacles的二进制字符串 |
+| **传输**   | `StreamData.data`     | 包装后的二进制数据      |
+
+### 4. 为什么这样设计？
+
+1. **性能优化**：前端不需要处理复杂的感知算法细节
+2. **数据精简**：移除前端不需要的字段（如点云数据、传感器原始数据）
+3. **格式统一**：所有障碍物都使用相同的 `Object` 格式
+4. **类型简化**：将枚举类型转换为字符串，便于前端处理
+
+### 5. 前端接收后的处理
+
+前端收到 `StreamData` 后：
+```typescript
+// 1. 解包 StreamData
+const streamData = StreamData.decode(data);
+
+// 2. 根据 data_name 判断数据类型
+if (streamData.dataName === 'obstacle') {
+    // 3. 反序列化二进制数据为 Obstacles
+    const obstacles = Obstacles.decode(streamData.data);
+    
+    // 4. 直接使用前端友好的格式进行渲染
+    obstacles.obstacle.forEach(obj => {
+        // obj 已经是前端友好的 Object 格式
+        renderObstacle(obj);
+    });
+}
+```
+
+**总结**：`StreamData.data` 字段中的二进制数据确实是 `Obstacles`（前端友好格式）的二进制化，而不是 `PerceptionObstacles`（原始格式）的二进制化。这个设计实现了从算法数据到用户界面数据的完美适配。
+
 #### **2.2 WebSocket 接收阶段**
+
 ```typescript
 // ChildWebSocketWorker - 接收二进制数据
 const deserializer = (data: unknown, name: string): Nullable<StreamMessage> => {
